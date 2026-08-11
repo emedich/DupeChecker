@@ -1,13 +1,13 @@
-"""
 Lead Checker - Desktop Tool  |  Calder Capital
 Checks a leads CSV against a Keap contacts CSV for duplicates.
 Results are written back into the original leads file.
 
 Tiered Remove Duplicate Logic (Same-Row Required):
-1. Email matches (strongest proof)
-2. OR Name + Company match on same row
-3. OR Name + Website match on same row
-4. OR any 3+ of the 5 categories match on same row
+1. YES: Email matches (any row)
+2. YES: Name (exact/nickname) + Company match on same row
+3. YES: Name (exact/nickname) + Website match on same row
+4. YES: Any 3+ of the 5 categories match on same row
+5. Check Contact Name: Website + Company match on same row (but name doesn't)
 
 Usage:  python lead_checker.py   (opens the GUI)
 Requires:  pip install pandas
@@ -17,10 +17,75 @@ import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from collections import defaultdict
 
 import pandas as pd
 
 SUPPORT_EMAIL = "leads@caldergr.com"
+
+# ---------------------------------------------------------------------------
+# Nickname Dictionary
+# ---------------------------------------------------------------------------
+NICKNAMES = {
+    'robert': ['rob', 'bob', 'bobby', 'bert'],
+    'william': ['bill', 'billy', 'will', 'willy', 'liam'],
+    'richard': ['dick', 'rick', 'rich', 'ritchie'],
+    'james': ['jim', 'jimmy', 'jamie'],
+    'joseph': ['joe', 'joey'],
+    'christopher': ['chris', 'topher'],
+    'matthew': ['matt', 'matty'],
+    'michael': ['mike', 'mikey'],
+    'thomas': ['tom', 'tommy'],
+    'david': ['dave', 'davy'],
+    'anthony': ['tony'],
+    'kenneth': ['ken', 'kenny'],
+    'steven': ['steve', 'stephan', 'stephen'],
+    'andrew': ['drew', 'andy'],
+    'gregory': ['greg'],
+    'joshua': ['josh'],
+    'timothy': ['tim', 'timmy'],
+    'ronald': ['ron', 'ronnie'],
+    'jeffrey': ['jeff', 'geoff'],
+    'ryan': ['ry'],
+    'nicholas': ['nick', 'nicky'],
+    'jonathan': ['jon', 'john', 'johnny'],
+    'charles': ['charlie', 'chuck'],
+    'edward': ['ed', 'eddie', 'ted', 'teddy'],
+    'elizabeth': ['liz', 'lizzie', 'beth', 'betsy', 'eliza'],
+    'katherine': ['kate', 'katie', 'kathy', 'kat'],
+    'catherine': ['cat', 'cathy', 'katie'],
+    'margaret': ['maggie', 'peggy', 'marge'],
+    'susan': ['sue', 'susie'],
+    'dorothy': ['dot', 'dottie'],
+    'rebecca': ['becca', 'becky'],
+    'deborah': ['deb', 'debbie'],
+    'patricia': ['pat', 'patty', 'trish', 'tricia'],
+    'jennifer': ['jen', 'jenny'],
+    'kimberly': ['kim'],
+    'alexandra': ['alex', 'ali', 'lexi'],
+    'alexander': ['alex', 'xander'],
+    'samuel': ['sam', 'sammy'],
+    'benjamin': ['ben', 'benny'],
+    'daniel': ['dan', 'danny'],
+    'phillip': ['phil'],
+    'douglas': ['doug'],
+    'patrick': ['pat', 'ricky'],
+    'raymond': ['ray'],
+    'gerald': ['jerry'],
+    'lawrence': ['larry'],
+    'terrence': ['terry'],
+    'bradley': ['brad'],
+}
+
+# Reverse mapping for faster lookup
+NICKNAME_MAP = {}
+for real_name, nicks in NICKNAMES.items():
+    NICKNAME_MAP[real_name] = real_name
+    for n in nicks:
+        NICKNAME_MAP[n] = real_name
+
+def get_root_name(name):
+    return NICKNAME_MAP.get(name.lower(), name.lower())
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,7 +101,6 @@ _SUFFIX_PATTERN = re.compile(
 _NON_ALNUM   = re.compile(r'[^a-z0-9\s]')
 _MULTI_SPACE = re.compile(r'\s+')
 
-
 def clean_company(name: str) -> str:
     if not isinstance(name, str) or not name.strip():
         return ''
@@ -46,7 +110,6 @@ def clean_company(name: str) -> str:
     s = _MULTI_SPACE.sub(' ', s).strip()
     return s
 
-
 def clean_web(url: str) -> str:
     if not isinstance(url, str) or not url.strip():
         return ''
@@ -54,13 +117,11 @@ def clean_web(url: str) -> str:
     s = s.split('/')[0]
     return s.strip()
 
-
 def col(df: pd.DataFrame, candidates: list):
     for c in candidates:
         if c in df.columns:
             return c
     return None
-
 
 def require_col(df: pd.DataFrame, candidates: list, label: str) -> str:
     c = col(df, candidates)
@@ -72,7 +133,6 @@ def require_col(df: pd.DataFrame, candidates: list, label: str) -> str:
         )
     return c
 
-
 def read_csv_safe(path: str, **kwargs) -> pd.DataFrame:
     for enc in ('utf-8-sig', 'latin-1', 'cp1252'):
         try:
@@ -83,12 +143,10 @@ def read_csv_safe(path: str, **kwargs) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False,
                        encoding='utf-8', encoding_errors='replace', **kwargs)
 
-
 _HEADER_MARKERS = [
     'Company Name', 'First Name', 'Executive First Name',
     'Last Name', 'Executive Last Name', 'Email', 'Website',
 ]
-
 
 def detect_skip_rows(path: str) -> int:
     for enc in ('utf-8-sig', 'latin-1', 'cp1252', 'utf-8'):
@@ -104,14 +162,11 @@ def detect_skip_rows(path: str) -> int:
             continue
     return 0
 
-
 # ---------------------------------------------------------------------------
 # Core processing
 # ---------------------------------------------------------------------------
 
-def process(leads_path: str, keap_path: str,
-            progress_callback=None) -> str:
-
+def process(leads_path: str, keap_path: str, progress_callback=None) -> str:
     def _p(msg: str):
         if progress_callback:
             progress_callback(msg)
@@ -123,8 +178,7 @@ def process(leads_path: str, keap_path: str,
 
     _p("Loading leads…")
     skip = detect_skip_rows(leads_path)
-    leads_df = read_csv_safe(leads_path,
-                             skiprows=list(range(skip)) if skip > 0 else None)
+    leads_df = read_csv_safe(leads_path, skiprows=list(range(skip)) if skip > 0 else None)
     _p(f"  {len(leads_df):,} leads loaded.\n")
 
     # 2. Validate columns
@@ -144,41 +198,82 @@ def process(leads_path: str, keap_path: str,
     k_comp   = require_col(keap_df, ['Company Name', 'Company'], 'Company Name (Keap)')
     _p("  All required columns found.\n")
 
-    # 3. Build lookup structures (vectorised)
+    # 3. Build lookup structures
     _p("Building lookup structures…")
-    k_full_s  = (keap_df[k_first].str.strip().str.lower() + ' ' +
-                 keap_df[k_last].str.strip().str.lower()).str.strip()
-    k_em1_s   = keap_df[k_email1].str.strip().str.lower()
-    k_em2_s   = keap_df[k_email2].str.strip().str.lower() if k_email2 else pd.Series([''] * len(keap_df), dtype=str)
-    k_em3_s   = keap_df[k_email3].str.strip().str.lower() if k_email3 else pd.Series([''] * len(keap_df), dtype=str)
-    k_web_s   = keap_df[k_web].str.strip().apply(clean_web)
-    k_comp_s  = keap_df[k_comp].str.strip()
-    k_comp_lo = k_comp_s.str.lower()
-    k_comp_tr = k_comp_s.apply(clean_company)
-
-    # Sets for individual column matches (any row)
-    set_name    = set(k_full_s[k_full_s != ''])
-    set_email   = set(k_em1_s[k_em1_s != '']) | set(k_em2_s[k_em2_s != '']) | set(k_em3_s[k_em3_s != ''])
-    set_website = set(k_web_s[k_web_s != ''])
-    set_company = set(k_comp_lo[k_comp_lo != ''])
-    set_trunc   = set(k_comp_tr[k_comp_tr != ''])
-
-    # Compound sets for tiered Remove Duplicate (must be same row)
-    # We store tuples of (name, email, web, comp, trunc) for each row
-    keap_rows = list(zip(k_full_s, k_em1_s, k_em2_s, k_em3_s, k_web_s, k_comp_lo, k_comp_tr))
     
-    # For speed, we'll use dictionaries to find rows by name/email
-    from collections import defaultdict
+    def get_name_variants(first, last):
+        f = first.strip().lower()
+        l = last.strip().lower()
+        if not f or not l: return set()
+        root = get_root_name(f)
+        variants = {f"{f} {l}"}
+        # Add the root name version if different
+        if root != f:
+            variants.add(f"{root} {l}")
+        # Add all other nicknames for that root
+        if root in NICKNAMES:
+            for nick in NICKNAMES[root]:
+                variants.add(f"{nick} {l}")
+        return variants
+
+    # We'll pre-process Keap data for matching
+    keap_rows = []
+    set_email = set()
+    set_website = set()
+    set_company = set()
+    set_trunc = set()
+    set_name = set()
+    
     rows_by_name = defaultdict(list)
-    for r in keap_rows:
-        if r[0]: rows_by_name[r[0]].append(r)
-    
+    rows_by_web = defaultdict(list)
+    rows_by_comp = defaultdict(list)
+
+    for i in range(len(keap_df)):
+        f = keap_df.at[i, k_first]
+        l = keap_df.at[i, k_last]
+        em1 = keap_df.at[i, k_email1].strip().lower()
+        em2 = keap_df.at[i, k_email2].strip().lower() if k_email2 else ""
+        em3 = keap_df.at[i, k_email3].strip().lower() if k_email3 else ""
+        web = clean_web(keap_df.at[i, k_web])
+        comp = keap_df.at[i, k_comp].strip().lower()
+        trunc = clean_company(keap_df.at[i, k_comp])
+        
+        name_variants = get_name_variants(f, l)
+        
+        row_data = {
+            'names': name_variants,
+            'emails': {e for e in [em1, em2, em3] if e},
+            'web': web,
+            'comp': comp,
+            'trunc': trunc
+        }
+        
+        keap_rows.append(row_data)
+        
+        # Add to global sets for individual column matches
+        set_name.update(name_variants)
+        set_email.update(row_data['emails'])
+        if web: set_website.add(web)
+        if comp: set_company.add(comp)
+        if trunc: set_trunc.add(trunc)
+        
+        # Add to lookup dicts for same-row matching
+        for v in name_variants:
+            rows_by_name[v].append(row_data)
+        if web:
+            rows_by_web[web].append(row_data)
+        if comp:
+            rows_by_comp[comp].append(row_data)
+        if trunc:
+            rows_by_comp[trunc].append(row_data)
+
     _p("  Lookup structures ready.\n")
 
     # 4. Process leads
     _p("Processing leads…")
-    l_full_s  = (leads_df[l_first].str.strip().str.lower() + ' ' +
-                 leads_df[l_last].str.strip().str.lower()).str.strip()
+    
+    l_first_s = leads_df[l_first].str.strip()
+    l_last_s  = leads_df[l_last].str.strip()
     l_email_s = leads_df[l_email].str.strip().str.lower()
     l_web_s   = leads_df[l_web].str.strip().apply(clean_web)
     l_comp_raw = leads_df[l_comp].str.strip()
@@ -191,52 +286,76 @@ def process(leads_path: str, keap_path: str,
             if val and val in target_set: return True
         return False
 
-    match_name    = l_full_s.isin(set_name) & (l_full_s != '')
-    match_email   = l_email_s.isin(set_email) & (l_email_s != '')
-    match_website = l_web_s.isin(set_website) & (l_web_s != '')
-    match_company = l_comp_raw.apply(lambda x: check_split_match(x, set_company))
-    match_trunc   = l_comp_raw.apply(lambda x: check_split_match(x, set_trunc, clean_company))
-    l_comp_tr_display = l_comp_raw.apply(lambda x: clean_company(x.split(';')[0]))
-
-    # 5. Tiered Remove Duplicate (Same-Row)
-    def is_rd(idx):
+    def is_rd_tiered(idx):
         em = l_email_s.iat[idx]
-        if em and em in set_email: return True # Rule 1: Email match (any row)
+        if em and em in set_email: return "YES" # Rule 1: Email match (any row)
         
-        fn = l_full_s.iat[idx]
-        if not fn: return False
-        
+        f = l_first_s.iat[idx]
+        l = l_last_s.iat[idx]
+        name_variants = get_name_variants(f, l)
         web = l_web_s.iat[idx]
         raw_comp = l_comp_raw.iat[idx]
         comp_parts = [p.strip().lower() for p in raw_comp.split(';')]
         trunc_parts = [clean_company(p) for p in raw_comp.split(';')]
         
-        # Check all Keap rows that have this name
-        for kr in rows_by_name[fn]:
-            # kr = (name, em1, em2, em3, web, comp, trunc)
-            k_em1, k_em2, k_em3, k_web, k_comp, k_trunc = kr[1], kr[2], kr[3], kr[4], kr[5], kr[6]
+        # Potential candidates for same-row matching
+        candidates = []
+        for v in name_variants:
+            candidates.extend(rows_by_name[v])
+        if web:
+            candidates.extend(rows_by_web[web])
+        for p in comp_parts:
+            if p: candidates.extend(rows_by_comp[p])
+        for p in trunc_parts:
+            if p: candidates.extend(rows_by_comp[p])
+            
+        # Unique candidates by object ID to avoid double checking
+        seen_ids = set()
+        unique_candidates = []
+        for c in candidates:
+            if id(c) not in seen_ids:
+                seen_ids.add(id(c))
+                unique_candidates.append(c)
+        
+        check_contact = False
+        
+        for cr in unique_candidates:
+            # Match flags for this specific Keap row
+            m_name = any(v in cr['names'] for v in name_variants)
+            m_em   = em in cr['emails'] if em else False
+            m_web  = (web == cr['web']) if web else False
+            m_comp = any(p == cr['comp'] for p in comp_parts if p)
+            m_tr   = any(p == cr['trunc'] for p in trunc_parts if p)
             
             # Rule 2: Name + Company
-            if any(p == k_comp for p in comp_parts if p): return True
+            if m_name and m_comp: return "YES"
             # Rule 3: Name + Website
-            if web and web == k_web: return True
-            
+            if m_name and m_web: return "YES"
             # Rule 4: 3+ matches on same row
-            m_count = 1 # Name already matches
-            if em and em in (k_em1, k_em2, k_em3): m_count += 1
-            if web and web == k_web: m_count += 1
-            if any(p == k_comp for p in comp_parts if p): m_count += 1
-            if any(p == k_trunc for p in trunc_parts if p): m_count += 1
-            if m_count >= 3: return True
+            if (int(m_name) + int(m_em) + int(m_web) + int(m_comp) + int(m_tr)) >= 3:
+                return "YES"
             
-        return False
+            # Rule 5: Website + Company (Check Contact Name)
+            if m_web and m_comp:
+                check_contact = True
+        
+        return "Check Contact Name" if check_contact else "NO"
 
-    remove_dup = pd.Series([is_rd(i) for i in range(len(leads_df))], index=leads_df.index)
+    # Individual column matches (for display columns)
+    match_name = pd.Series([any(v in set_name for v in get_name_variants(f, l)) 
+                           for f, l in zip(l_first_s, l_last_s)], index=leads_df.index)
+    match_email   = l_email_s.isin(set_email) & (l_email_s != '')
+    match_website = l_web_s.isin(set_website) & (l_web_s   != '')
+    match_company = l_comp_raw.apply(lambda x: check_split_match(x, set_company))
+    match_trunc   = l_comp_raw.apply(lambda x: check_split_match(x, set_trunc, clean_company))
+    l_comp_tr_display = l_comp_raw.apply(lambda x: clean_company(x.split(';')[0]))
+
+    remove_dup = pd.Series([is_rd_tiered(i) for i in range(len(leads_df))], index=leads_df.index)
 
     # 6. Insert columns at the LEFT
     yes = 'YES'
     new_cols = {
-        'Remove Duplicate':           remove_dup.apply(lambda x: yes if x else 'NO'),
+        'Remove Duplicate':           remove_dup,
         'Match - Truncated Company':  match_trunc.apply(lambda x: yes if x else ''),
         'Match - Company Name':       match_company.apply(lambda x: yes if x else ''),
         'Match - Website':            match_website.apply(lambda x: yes if x else ''),
@@ -250,8 +369,10 @@ def process(leads_path: str, keap_path: str,
 
     _p(f"Saving results back to:\n  {leads_path}\n")
     leads_df.to_csv(leads_path, index=False)
-    total, removes = len(leads_df), int(remove_dup.sum())
-    summary = f"Complete!\n\n  Leads processed  : {total:,}\n  Remove Duplicate : {removes:,}\n\nResults saved to original file."
+    total = len(leads_df)
+    removes = int((remove_dup == "YES").sum())
+    checks = int((remove_dup == "Check Contact Name").sum())
+    summary = f"Complete!\n\n  Leads processed  : {total:,}\n  Remove Duplicate : {removes:,}\n  Check Contact    : {checks:,}\n\nResults saved to original file."
     _p(summary)
     return summary
 
@@ -336,3 +457,4 @@ class App(tk.Tk):
 
 if __name__ == '__main__':
     App().mainloop()
+
